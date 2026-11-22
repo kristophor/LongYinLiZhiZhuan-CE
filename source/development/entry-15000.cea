@@ -1,0 +1,43 @@
+[ENABLE]
+{$lua}
+if syntaxcheck then return end
+local function need(v,msg) if not v then error(msg) end return v end
+local function q(a) local v=readQword(a);return need(v and v~=0 and v,'门派指针不可读，请读档完成后重试') end
+local base=need(getAddressSafe('GameAssembly.dll'),'请先连接游戏')
+local klass=q(base+0x1E52870)
+need(readString(q(klass+16),100)=='GameController','游戏版本不匹配')
+local world=q(q(q(klass+0xB8))+0x20)
+local hero=q(q(q(world+0x50)+0x10)+0x20)
+need(readInteger(hero+0x58)==0,'未找到主角')
+local id=need(readInteger(hero+0x84),'门派 ID 不可读')
+need(id>=0,'主角尚未加入门派')
+local list=q(world+0x48);local count=need(readInteger(list+0x18),'门派列表不可读')
+need(count>=0 and count<10000,'门派列表异常')
+local array=q(list+0x10);local index,force
+for n=0,count-1 do local p=q(array+0x20+n*8);if readInteger(p+0x10)==id then index=n;force=p;break end end
+need(force,'未找到所属门派')
+local dict=q(q(force+0x148)+0x10)
+local entries=q(dict+0x18);local count=need(readInteger(dict+0x20),'科研加成字典不可读')
+need(count>=0 and count<10000,'科研加成字典异常')
+local slot
+for n=0,count-1 do
+ local e=entries+0x20+n*16
+ local hash=readInteger(e)
+ if hash and hash<0x80000000 and readInteger(e+8)==4 then slot=0x20+n*16+12;break end
+end
+need(slot,'当前门派没有科研加成条目')
+local r=need(getAddressList().getMemoryRecordByID(15001),'缺少科研记录')
+local offsets={slot,0x18,0x10,0x148,0x20+index*8,0x10,0x48,0x20,0,0xB8}
+local ok,err=pcall(function()
+ r.Active=false;r.Address='"GameAssembly.dll"+1E52870';r.OffsetCount=#offsets
+ for j,off in ipairs(offsets) do r.OffsetText[j-1]=string.format('%X',off) end
+ need(r.getCurrentAddress()==entries+slot,'科研指针解析不匹配')
+end)
+if not ok then r.Active=false;r.OffsetCount=0;r.Address='0';error(err) end
+{$asm}
+[DISABLE]
+{$lua}
+if syntaxcheck then return end
+local r=getAddressList().getMemoryRecordByID(15001)
+if r then r.Active=false;r.OffsetCount=0;r.Address='0' end
+{$asm}

@@ -1,0 +1,58 @@
+[ENABLE]
+{$lua}
+if syntaxcheck then return end
+local function need(v,msg) if not v then error(msg) end return v end
+local function q(a) local v=readQword(a);return need(v and v~=0 and v,'门派指针不可读，请读档完成后重试') end
+local base=need(getAddressSafe('GameAssembly.dll'),'请先连接游戏')
+local klass=q(base+0x1E52870)
+need(readString(q(klass+16),100)=='GameController','游戏版本不匹配')
+local world=q(q(q(klass+0xB8))+0x20)
+local hero=q(q(q(world+0x50)+0x10)+0x20)
+need(readInteger(hero+0x58)==0,'未找到主角')
+local id=need(readInteger(hero+0x84),'门派 ID 不可读')
+need(id>=0,'主角尚未加入门派')
+local list=q(world+0x48);local count=need(readInteger(list+0x18),'门派列表不可读')
+need(count>=0 and count<10000,'门派列表异常')
+local array=q(list+0x10);local index,force
+for n=0,count-1 do local p=q(array+0x20+n*8);if readInteger(p+0x10)==id then index=n;force=p;break end end
+need(force,'未找到所属门派')
+for _,off in ipairs({0x88,0x90,0x98}) do
+ local resources=q(force+off);need(readInteger(resources+0x18)==6,'资源数量与版本不符')
+ local a=q(resources+0x10)
+ need(readString(q(q(a)+16),100)=='Single[]','资源类型不符')
+end
+local records={};local al=getAddressList()
+for n=1,18 do records[n]=need(al.getMemoryRecordByID(11000+n),'门派资源记录缺失，请重新载入 CT') end
+-- Setting Address may rebuild a CE record's pointer metadata. Set it first,
+-- then restore the whole chain, rather than editing one inherited offset.
+local expected={}
+for n=1,18 do
+ local group=math.floor((n-1)/6);local element=(n-1)%6
+ local resourceOffset=({0x88,0x90,0x98})[group+1]
+ expected[n]=q(q(force+resourceOffset)+0x10)+0x20+element*4
+end
+local ok,err=pcall(function()
+ for n,r in ipairs(records) do
+  local group=math.floor((n-1)/6);local element=(n-1)%6
+  local offsets={0x20+element*4,0x10,({0x88,0x90,0x98})[group+1],0x20+index*8,0x10,0x48,0x20,0,0xB8}
+  r.Active=false;r.Address='"GameAssembly.dll"+1E52870';r.OffsetCount=#offsets
+  for j,offset in ipairs(offsets) do r.OffsetText[j-1]=string.format('%X',offset) end
+  local actual=r.getCurrentAddress()
+  need(actual==expected[n],string.format('资源 %d 的 CE 指针解析不匹配：实际 %s，预期 %X；未修改资源',n,tostring(actual),expected[n]))
+ end
+end)
+if not ok then
+ for _,r in ipairs(records) do r.Active=false;r.OffsetCount=0;r.Address='0' end
+ error(err)
+end
+local nameptr=q(force+0x18);local length=readInteger(nameptr+0x10)
+local name=length and length>=0 and length<200 and readString(nameptr+0x14,length*2,true) or tostring(id)
+al.getMemoryRecordByID(11000).Description='门派资源 · '..name..'（读档/换门派后重新勾选）'
+
+{$asm}
+[DISABLE]
+{$lua}
+if syntaxcheck then return end
+local al=getAddressList()
+for n=1,18 do local r=al.getMemoryRecordByID(11000+n);if r then r.Active=false;r.OffsetCount=0;r.Address='0' end end
+{$asm}

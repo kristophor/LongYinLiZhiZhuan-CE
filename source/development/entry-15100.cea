@@ -1,0 +1,18 @@
+[ENABLE]
+{$lua}
+if syntaxcheck then return end
+if not LongYiInventory or LongYiInventory.uiVersion~=44.8 then
+ local main=getAddressList().getMemoryRecordByID(10000)
+ if not main then error('未找到主编辑器') end
+ if main.Active then main.Active=false end
+ main.Active=true
+end
+if not LongYiInventory or not LongYiInventory.showSectBonuses then error('请先打开主编辑器')end
+LongYiInventory.showSectBonuses()
+{$asm}
+[DISABLE]
+{$lua}
+if syntaxcheck then return end
+if LongYiInventory and LongYiInventory.stopSectSpeedLock then LongYiInventory.stopSectSpeedLock()end
+if LongYiInventory and LongYiInventory.sectBonusForm then LongYiInventory.sectBonusForm.hide()end
+{$asm}

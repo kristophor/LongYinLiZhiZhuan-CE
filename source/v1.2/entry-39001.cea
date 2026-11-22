@@ -1,0 +1,324 @@
+[ENABLE]
+{$lua}
+if syntaxcheck then return end
+LONGYI_WAREHOUSE_INSTALL=true
+-- CE-only, temporary Unity UI. No game files, saves, or item lists are edited.
+local installing=LONGYI_WAREHOUSE_INSTALL~=false
+if LongYiWarehouseBusy then error('仓库按钮正在处理中，请稍候')end
+local function check(v,s)if not v then error(s,2)end;return v end
+local function q(a)return check(readQword(a),'指针不可读')end
+local function int(a)return check(readInteger(a),'数据不可读')end
+local function cstr(a)return readString(a,180) or ''end
+local function ustr(a)if a==0 then return ''end;local n=int(a+16);check(n<4096,'文字长度异常');return readString(a+20,n*2,true) or ''end
+local function classname(p)return cstr(q(q(p)+16))end
+local pid=getOpenedProcessID();local base=check(getAddressSafe('GameAssembly.dll'),'请连接游戏并读入存档')
+local update=base+0x18B9460;local original=readBytes(update,6,true);check(original and #original==6,'Update 不可读')
+local function matches(a,b)if not a or not b or #a~=#b then return false end;for n=1,#a do if a[n]~=b[n]then return false end end;return true end
+local chain
+if not matches(original,{0x40,0x53,0x48,0x83,0xEC,0x40})then
+ for _,name in ipairs({'LongYiItemBridgeV13','LongYiItemBridgeV12','LongYiItemBridgeV11','LongYiItemBridgeV10'})do
+  local b=_G[name]
+  if b and b.pid==pid and b.base==base and matches(original,b.patch)then
+   check(int(b.data)~=1 and int(b.data)~=2,'请等当前物品操作结束');chain=b.mem;break
+  end
+ end
+ check(chain,'Update 被其他脚本修改；请先停用冲突脚本或重启游戏，未覆盖原入口')
+end
+local pe=int(base+0x3C);local e=base+int(base+pe+0x88);local exports={}
+for n=0,int(e+0x18)-1 do
+ local name=cstr(base+int(base+int(e+0x20)+n*4))
+ if name:find('il2cpp_',1,true)==1 then local ord=readSmallInteger(base+int(e+0x24)+n*2);exports[name]=base+int(base+int(e+0x1C)+ord*4)end
+end
+local function method(obj,name,argc,rva)
+ local k=q(obj)
+ while k~=0 do
+  local tab=q(k+0x98)
+  for n=0,2047 do
+   local m=readQword(tab+n*8);if not m or m==0 or readQword(m+24)~=k then break end
+   if cstr(q(m+16))==name and readBytes(m+0x4A,1)==argc and q(m)~=0 and (not rva or q(m)==base+rva)then return m end
+  end
+  k=q(k+0x58)
+ end
+ error('找不到接口：'..name)
+end
+LongYiWarehouseBusy=true
+local mem=allocateMemory(0x10000,update)
+if not mem then LongYiWarehouseBusy=nil;error('无法分配临时调用区')end
+local d=mem+0x2000;local cursor=mem+0x3000;local handles={};local attached=false;local patch;local created
+local regs={'rax','rcx','rdx','rbx','rbp','rsi','rdi','r8','r9','r10','r11','r12','r13','r14','r15'}
+local asm={'label(done)','label(noroot)',string.format('%X:',mem),'pushfq'}
+for _,r in ipairs(regs)do asm[#asm+1]='push '..r end
+asm[#asm+1]='sub rsp,A8'
+for n=0,5 do asm[#asm+1]=string.format('movdqu [rsp+%X],xmm%d',n==0 and 0x80 or 0x20+n*16,n)end
+asm[#asm+1]=string.format([[
+mov rbx,%X
+cmp dword ptr [rbx],1
+jne done
+mov dword ptr [rbx],2
+mov rcx,[rbx+18]
+mov rdx,[rbx+20]
+mov r8,[rbx+28]
+mov r9,[rbx+30]
+mov rax,[rbx+38]
+mov [rsp+20],rax
+mov rax,[rbx+10]
+call rax
+mov [rbx+8],rax
+cmp dword ptr [rbx+48],1
+jne noroot
+mov rcx,rax
+xor edx,edx
+mov rax,%X
+call rax
+mov [rbx+40],eax
+noroot:
+mov dword ptr [rbx],3
+done:]],d,check(exports.il2cpp_gchandle_new,'缺少 IL2CPP 导出'))
+for n=0,5 do asm[#asm+1]=string.format('movdqu xmm%d,[rsp+%X]',n,n==0 and 0x80 or 0x20+n*16)end
+asm[#asm+1]='add rsp,A8'
+for n=#regs,1,-1 do asm[#asm+1]='pop '..regs[n]end
+asm[#asm+1]='popfq'
+asm[#asm+1]=chain and string.format('jmp %X',chain) or string.format('push rbx\nsub rsp,40\njmp %X',update+6)
+local function call(fn,args,root)
+ check(int(d)~=2,'上一次调用尚未完成')
+ writeQword(d+8,0);writeQword(d+16,fn)
+ for n=1,5 do writeQword(d+0x10+n*8,args and args[n] or 0)end
+ writeInteger(d+0x48,root and 1 or 0);writeInteger(d,1)
+ local start=getTickCount()
+ while int(d)~=3 do
+  if getTickCount()-start>5000 then if int(d)==1 then writeInteger(d,0)end;error('游戏未完成调用；请回到游戏运行，不要重复勾选')end
+  sleep(10);processMessages()
+ end
+ if root then handles[#handles+1]=int(d+0x40)end
+ return q(d+8)
+end
+local function blob(bytes)
+ local a=cursor;cursor=math.floor((cursor+#bytes+15)/16)*16;check(cursor<mem+0x10000,'临时参数区已满')
+ check(writeBytes(a,bytes),'参数写入失败');return a
+end
+local function number(v)local a=blob({0,0,0,0,0,0,0,0});writeInteger(a,v);return a end
+local function vector(values)local bytes={};for _=1,#values*4 do bytes[#bytes+1]=0 end;local a=blob(bytes);for n,v in ipairs(values)do writeFloat(a+(n-1)*4,v)end;return a end
+local function str(s)local a={s:byte(1,#s)};a[#a+1]=0;return call(exports.il2cpp_string_new,{blob(a)},true)end
+local function invoke(m,obj,args)
+ local a=0;if args and #args>0 then local bytes={};for _=1,#args*8 do bytes[#bytes+1]=0 end;a=blob(bytes);for n,v in ipairs(args)do writeQword(a+(n-1)*8,v)end end
+ local ex=blob({0,0,0,0,0,0,0,0});local result=call(exports.il2cpp_runtime_invoke,{m,obj,a,ex});check(q(ex)==0,'游戏接口报告异常');return result
+end
+local function invokeNamed(obj,name,args,rva)return invoke(method(obj,name,args and #args or 0,rva),obj,args)end
+local function transform(go)return invokeNamed(go,'get_transform')end
+local function getgo(tr)return invokeNamed(tr,'get_gameObject')end
+local function getchild(tr,n)return invokeNamed(tr,'GetChild',{number(n)})end
+local function count(tr)return int(invokeNamed(tr,'get_childCount')+16)end
+local ok,err=pcall(function()
+ check(autoAssemble(table.concat(asm,'\n')),'临时调用代码编译失败')
+ check(math.abs(mem-update)<0x7FFFFFF0,'临时调用区距离过远')
+ check(matches(readBytes(update,6,true),original),'入口已变化')
+ check(autoAssemble(string.format('%X:\njmp %X\nnop',update,mem)),'临时入口安装失败');attached=true;patch=readBytes(update,6,true)
+ local detail=q(q(q(base+0x1E55AE8)+0xB8));check(classname(detail)=='HeroDetailController','游戏版本不匹配')
+ local ctrl=q(detail+0x48);local tab=transform(q(ctrl+0x38));local parent=invokeNamed(invokeNamed(tab,'get_parent'),'get_parent')
+ local existing
+ for n=0,count(parent)-1 do local go=getgo(getchild(parent,n));if ustr(invokeNamed(go,'get_name'))=='LongYi_WarehouseShortcut_Experiment'then existing=go;break end end
+ if not installing then
+  if existing then invokeNamed(existing,'SetActive',{number(0)})end
+  LongYiWarehouseShortcut=existing and {pid=pid,base=base,go=existing,visible=false} or nil;return
+ end
+ if existing then invokeNamed(existing,'SetActive',{number(1)});LongYiWarehouseShortcut={pid=pid,base=base,go=existing,visible=true};return end
+ local size=number(0);local assemblies=call(exports.il2cpp_domain_get_assemblies,{call(exports.il2cpp_domain_get),size});local images={}
+ for n=0,q(size)-1 do local im=q(q(assemblies+n*8));images[cstr(q(im))]=im end
+ local function klass(image,ns,name)
+  local function cbytes(s)local t={s:byte(1,#s)};t[#t+1]=0;return blob(t)end
+  return check(call(exports.il2cpp_class_from_name,{check(images[image],'程序集未加载'),cbytes(ns),cbytes(name)}),'类不可用')
+ end
+ local function typ(k)return call(exports.il2cpp_type_get_object,{call(exports.il2cpp_class_get_type,{k})})end
+ local textType=typ(klass('UnityEngine.UI.dll','UnityEngine.UI','Text'));local buttonType=typ(klass('UnityEngine.UI.dll','UnityEngine.UI','Button'))
+ local build=q(q(klass('Assembly-CSharp.dll','','BuildingUIController')+0xB8)+8)
+ check(build~=0 and q(build+16)~=0,'游戏界面尚未加载，请读档后重试')
+ method(build,'OpenSelfStorage',0,0x923A50)
+ local source=q(build+0x28);check(source~=0 and classname(source)=='GameObject' and q(source+16)~=0,'仓库按钮预制体尚未加载，请读档后重试')
+ created=invoke(method(source,'Instantiate',3,0xAE98A0),0,{source,parent,number(0)});check(created~=0,'按钮创建失败')
+ invokeNamed(created,'set_name',{str('LongYi_WarehouseShortcut_Experiment')})
+ local tr=transform(created)
+ invokeNamed(tr,'set_anchorMin',{vector({0.5,0.5})});invokeNamed(tr,'set_anchorMax',{vector({0.5,0.5})});invokeNamed(tr,'set_pivot',{vector({0.5,0.5})})
+ invokeNamed(tr,'set_sizeDelta',{vector({140,38})});invokeNamed(tr,'set_localScale',{vector({1,1,1})});invokeNamed(tr,'set_anchoredPosition',{vector({178,-22})});invokeNamed(tr,'SetAsLastSibling')
+ local tx=invokeNamed(getgo(getchild(tr,0)),'GetComponent',{textType});check(tx~=0,'按钮文字组件不存在')
+ invokeNamed(tx,'set_text',{str('家中仓库')});invokeNamed(tx,'set_fontSize',{number(22)})
+ local button=invokeNamed(created,'GetComponent',{buttonType});local ev=q(button+0xF8);local list=q(q(ev+0x18)+16)
+ check(int(list+24)>0,'按钮事件为空');local listener=q(q(list+16)+32);local oldTarget=q(listener+16)
+ for _,v in ipairs({{16,build},{24,str('BuildingUIController, Assembly-CSharp')},{32,str('OpenSelfStorage')}})do call(exports.il2cpp_gc_wbarrier_set_field,{listener,listener+v[1],v[2]})end
+ invokeNamed(ev,'DirtyPersistentCalls')
+ -- The generic template has no selected house choice; remove its unused tooltip/click controller.
+ if oldTarget~=0 and classname(oldTarget)=='BuildingButtonController' then invoke(method(oldTarget,'Destroy',1,0xAE8CF0),0,{oldTarget})end
+ invokeNamed(created,'SetActive',{number(1)})
+ LongYiWarehouseShortcut={pid=pid,base=base,go=created}
+end)
+if attached and int(d)~=2 then
+ if not ok and created then pcall(function()invoke(method(created,'Destroy',1,0xAE8CF0),0,{created})end)end
+ for _,h in ipairs(handles)do pcall(call,exports.il2cpp_gchandle_free,{h})end
+ if matches(readBytes(update,6,true),patch)then writeBytes(update,original)else ok=false;err='入口已变化，未覆盖其他脚本'end
+elseif attached then ok=false;err=tostring(err)..'；调用仍在执行，保留临时调用区，勿重复操作'end
+-- Scratch pages remain until process exit so no returning game frame uses freed code.
+LongYiWarehouseBusy=nil
+if not ok then error(err)end
+
+{$asm}
+[DISABLE]
+{$lua}
+if syntaxcheck then return end
+LONGYI_WAREHOUSE_INSTALL=false
+-- CE-only, temporary Unity UI. No game files, saves, or item lists are edited.
+local installing=LONGYI_WAREHOUSE_INSTALL~=false
+if LongYiWarehouseBusy then error('仓库按钮正在处理中，请稍候')end
+local function check(v,s)if not v then error(s,2)end;return v end
+local function q(a)return check(readQword(a),'指针不可读')end
+local function int(a)return check(readInteger(a),'数据不可读')end
+local function cstr(a)return readString(a,180) or ''end
+local function ustr(a)if a==0 then return ''end;local n=int(a+16);check(n<4096,'文字长度异常');return readString(a+20,n*2,true) or ''end
+local function classname(p)return cstr(q(q(p)+16))end
+local pid=getOpenedProcessID();local base=check(getAddressSafe('GameAssembly.dll'),'请连接游戏并读入存档')
+local update=base+0x18B9460;local original=readBytes(update,6,true);check(original and #original==6,'Update 不可读')
+local function matches(a,b)if not a or not b or #a~=#b then return false end;for n=1,#a do if a[n]~=b[n]then return false end end;return true end
+local chain
+if not matches(original,{0x40,0x53,0x48,0x83,0xEC,0x40})then
+ for _,name in ipairs({'LongYiItemBridgeV13','LongYiItemBridgeV12','LongYiItemBridgeV11','LongYiItemBridgeV10'})do
+  local b=_G[name]
+  if b and b.pid==pid and b.base==base and matches(original,b.patch)then
+   check(int(b.data)~=1 and int(b.data)~=2,'请等当前物品操作结束');chain=b.mem;break
+  end
+ end
+ check(chain,'Update 被其他脚本修改；请先停用冲突脚本或重启游戏，未覆盖原入口')
+end
+local pe=int(base+0x3C);local e=base+int(base+pe+0x88);local exports={}
+for n=0,int(e+0x18)-1 do
+ local name=cstr(base+int(base+int(e+0x20)+n*4))
+ if name:find('il2cpp_',1,true)==1 then local ord=readSmallInteger(base+int(e+0x24)+n*2);exports[name]=base+int(base+int(e+0x1C)+ord*4)end
+end
+local function method(obj,name,argc,rva)
+ local k=q(obj)
+ while k~=0 do
+  local tab=q(k+0x98)
+  for n=0,2047 do
+   local m=readQword(tab+n*8);if not m or m==0 or readQword(m+24)~=k then break end
+   if cstr(q(m+16))==name and readBytes(m+0x4A,1)==argc and q(m)~=0 and (not rva or q(m)==base+rva)then return m end
+  end
+  k=q(k+0x58)
+ end
+ error('找不到接口：'..name)
+end
+LongYiWarehouseBusy=true
+local mem=allocateMemory(0x10000,update)
+if not mem then LongYiWarehouseBusy=nil;error('无法分配临时调用区')end
+local d=mem+0x2000;local cursor=mem+0x3000;local handles={};local attached=false;local patch;local created
+local regs={'rax','rcx','rdx','rbx','rbp','rsi','rdi','r8','r9','r10','r11','r12','r13','r14','r15'}
+local asm={'label(done)','label(noroot)',string.format('%X:',mem),'pushfq'}
+for _,r in ipairs(regs)do asm[#asm+1]='push '..r end
+asm[#asm+1]='sub rsp,A8'
+for n=0,5 do asm[#asm+1]=string.format('movdqu [rsp+%X],xmm%d',n==0 and 0x80 or 0x20+n*16,n)end
+asm[#asm+1]=string.format([[
+mov rbx,%X
+cmp dword ptr [rbx],1
+jne done
+mov dword ptr [rbx],2
+mov rcx,[rbx+18]
+mov rdx,[rbx+20]
+mov r8,[rbx+28]
+mov r9,[rbx+30]
+mov rax,[rbx+38]
+mov [rsp+20],rax
+mov rax,[rbx+10]
+call rax
+mov [rbx+8],rax
+cmp dword ptr [rbx+48],1
+jne noroot
+mov rcx,rax
+xor edx,edx
+mov rax,%X
+call rax
+mov [rbx+40],eax
+noroot:
+mov dword ptr [rbx],3
+done:]],d,check(exports.il2cpp_gchandle_new,'缺少 IL2CPP 导出'))
+for n=0,5 do asm[#asm+1]=string.format('movdqu xmm%d,[rsp+%X]',n,n==0 and 0x80 or 0x20+n*16)end
+asm[#asm+1]='add rsp,A8'
+for n=#regs,1,-1 do asm[#asm+1]='pop '..regs[n]end
+asm[#asm+1]='popfq'
+asm[#asm+1]=chain and string.format('jmp %X',chain) or string.format('push rbx\nsub rsp,40\njmp %X',update+6)
+local function call(fn,args,root)
+ check(int(d)~=2,'上一次调用尚未完成')
+ writeQword(d+8,0);writeQword(d+16,fn)
+ for n=1,5 do writeQword(d+0x10+n*8,args and args[n] or 0)end
+ writeInteger(d+0x48,root and 1 or 0);writeInteger(d,1)
+ local start=getTickCount()
+ while int(d)~=3 do
+  if getTickCount()-start>5000 then if int(d)==1 then writeInteger(d,0)end;error('游戏未完成调用；请回到游戏运行，不要重复勾选')end
+  sleep(10);processMessages()
+ end
+ if root then handles[#handles+1]=int(d+0x40)end
+ return q(d+8)
+end
+local function blob(bytes)
+ local a=cursor;cursor=math.floor((cursor+#bytes+15)/16)*16;check(cursor<mem+0x10000,'临时参数区已满')
+ check(writeBytes(a,bytes),'参数写入失败');return a
+end
+local function number(v)local a=blob({0,0,0,0,0,0,0,0});writeInteger(a,v);return a end
+local function vector(values)local bytes={};for _=1,#values*4 do bytes[#bytes+1]=0 end;local a=blob(bytes);for n,v in ipairs(values)do writeFloat(a+(n-1)*4,v)end;return a end
+local function str(s)local a={s:byte(1,#s)};a[#a+1]=0;return call(exports.il2cpp_string_new,{blob(a)},true)end
+local function invoke(m,obj,args)
+ local a=0;if args and #args>0 then local bytes={};for _=1,#args*8 do bytes[#bytes+1]=0 end;a=blob(bytes);for n,v in ipairs(args)do writeQword(a+(n-1)*8,v)end end
+ local ex=blob({0,0,0,0,0,0,0,0});local result=call(exports.il2cpp_runtime_invoke,{m,obj,a,ex});check(q(ex)==0,'游戏接口报告异常');return result
+end
+local function invokeNamed(obj,name,args,rva)return invoke(method(obj,name,args and #args or 0,rva),obj,args)end
+local function transform(go)return invokeNamed(go,'get_transform')end
+local function getgo(tr)return invokeNamed(tr,'get_gameObject')end
+local function getchild(tr,n)return invokeNamed(tr,'GetChild',{number(n)})end
+local function count(tr)return int(invokeNamed(tr,'get_childCount')+16)end
+local ok,err=pcall(function()
+ check(autoAssemble(table.concat(asm,'\n')),'临时调用代码编译失败')
+ check(math.abs(mem-update)<0x7FFFFFF0,'临时调用区距离过远')
+ check(matches(readBytes(update,6,true),original),'入口已变化')
+ check(autoAssemble(string.format('%X:\njmp %X\nnop',update,mem)),'临时入口安装失败');attached=true;patch=readBytes(update,6,true)
+ local detail=q(q(q(base+0x1E55AE8)+0xB8));check(classname(detail)=='HeroDetailController','游戏版本不匹配')
+ local ctrl=q(detail+0x48);local tab=transform(q(ctrl+0x38));local parent=invokeNamed(invokeNamed(tab,'get_parent'),'get_parent')
+ local existing
+ for n=0,count(parent)-1 do local go=getgo(getchild(parent,n));if ustr(invokeNamed(go,'get_name'))=='LongYi_WarehouseShortcut_Experiment'then existing=go;break end end
+ if not installing then
+  if existing then invokeNamed(existing,'SetActive',{number(0)})end
+  LongYiWarehouseShortcut=existing and {pid=pid,base=base,go=existing,visible=false} or nil;return
+ end
+ if existing then invokeNamed(existing,'SetActive',{number(1)});LongYiWarehouseShortcut={pid=pid,base=base,go=existing,visible=true};return end
+ local size=number(0);local assemblies=call(exports.il2cpp_domain_get_assemblies,{call(exports.il2cpp_domain_get),size});local images={}
+ for n=0,q(size)-1 do local im=q(q(assemblies+n*8));images[cstr(q(im))]=im end
+ local function klass(image,ns,name)
+  local function cbytes(s)local t={s:byte(1,#s)};t[#t+1]=0;return blob(t)end
+  return check(call(exports.il2cpp_class_from_name,{check(images[image],'程序集未加载'),cbytes(ns),cbytes(name)}),'类不可用')
+ end
+ local function typ(k)return call(exports.il2cpp_type_get_object,{call(exports.il2cpp_class_get_type,{k})})end
+ local textType=typ(klass('UnityEngine.UI.dll','UnityEngine.UI','Text'));local buttonType=typ(klass('UnityEngine.UI.dll','UnityEngine.UI','Button'))
+ local build=q(q(klass('Assembly-CSharp.dll','','BuildingUIController')+0xB8)+8)
+ check(build~=0 and q(build+16)~=0,'游戏界面尚未加载，请读档后重试')
+ method(build,'OpenSelfStorage',0,0x923A50)
+ local source=q(build+0x28);check(source~=0 and classname(source)=='GameObject' and q(source+16)~=0,'仓库按钮预制体尚未加载，请读档后重试')
+ created=invoke(method(source,'Instantiate',3,0xAE98A0),0,{source,parent,number(0)});check(created~=0,'按钮创建失败')
+ invokeNamed(created,'set_name',{str('LongYi_WarehouseShortcut_Experiment')})
+ local tr=transform(created)
+ invokeNamed(tr,'set_anchorMin',{vector({0.5,0.5})});invokeNamed(tr,'set_anchorMax',{vector({0.5,0.5})});invokeNamed(tr,'set_pivot',{vector({0.5,0.5})})
+ invokeNamed(tr,'set_sizeDelta',{vector({140,38})});invokeNamed(tr,'set_localScale',{vector({1,1,1})});invokeNamed(tr,'set_anchoredPosition',{vector({178,-22})});invokeNamed(tr,'SetAsLastSibling')
+ local tx=invokeNamed(getgo(getchild(tr,0)),'GetComponent',{textType});check(tx~=0,'按钮文字组件不存在')
+ invokeNamed(tx,'set_text',{str('家中仓库')});invokeNamed(tx,'set_fontSize',{number(22)})
+ local button=invokeNamed(created,'GetComponent',{buttonType});local ev=q(button+0xF8);local list=q(q(ev+0x18)+16)
+ check(int(list+24)>0,'按钮事件为空');local listener=q(q(list+16)+32);local oldTarget=q(listener+16)
+ for _,v in ipairs({{16,build},{24,str('BuildingUIController, Assembly-CSharp')},{32,str('OpenSelfStorage')}})do call(exports.il2cpp_gc_wbarrier_set_field,{listener,listener+v[1],v[2]})end
+ invokeNamed(ev,'DirtyPersistentCalls')
+ -- The generic template has no selected house choice; remove its unused tooltip/click controller.
+ if oldTarget~=0 and classname(oldTarget)=='BuildingButtonController' then invoke(method(oldTarget,'Destroy',1,0xAE8CF0),0,{oldTarget})end
+ invokeNamed(created,'SetActive',{number(1)})
+ LongYiWarehouseShortcut={pid=pid,base=base,go=created}
+end)
+if attached and int(d)~=2 then
+ if not ok and created then pcall(function()invoke(method(created,'Destroy',1,0xAE8CF0),0,{created})end)end
+ for _,h in ipairs(handles)do pcall(call,exports.il2cpp_gchandle_free,{h})end
+ if matches(readBytes(update,6,true),patch)then writeBytes(update,original)else ok=false;err='入口已变化，未覆盖其他脚本'end
+elseif attached then ok=false;err=tostring(err)..'；调用仍在执行，保留临时调用区，勿重复操作'end
+-- Scratch pages remain until process exit so no returning game frame uses freed code.
+LongYiWarehouseBusy=nil
+if not ok then error(err)end
+
+{$asm}

@@ -1,0 +1,7 @@
+{
+  "note": "All current range enum types implemented. Directional ranges show four-facing union; dark red is one example facing (southeast for oblique). Reproduced from GameAssembly RVAs 5E7BB0/5E80C0/5E7E90/5E76C0. No terrain or character bonuses; radius capped at 10.",
+  "catalog_sha256": "7CBC54A4ADE94A86C7761416DBB9427155B0D7D16134289E1C17B3DC3E946E6C",
+  "unsupported_ids": [],
+  "directional_count": 217,
+  "count": 1051
+}

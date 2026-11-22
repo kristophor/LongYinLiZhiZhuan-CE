@@ -1,0 +1,5 @@
+* text=auto
+*.png binary
+*.CT text eol=lf
+*.lua text eol=lf
+*.cea text eol=lf

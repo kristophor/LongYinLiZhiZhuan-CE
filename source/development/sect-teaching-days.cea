@@ -1,0 +1,33 @@
+[ENABLE]
+{$lua}
+if syntaxcheck then return end
+if not LongYiSectTeachingUnlimited or LongYiSectTeachingUnlimited.pid~=getOpenedProcessID() then
+ error('请先勾选上级的门派指点 / 传授不限次数')
+end
+{$asm}
+assert(GameAssembly.dll+2A1E47,8B 78 70 48 85 C9 0F 84 86 00 00 00)
+alloc(LongYiTeachDaysHook,1024,GameAssembly.dll+2A1E47)
+label(LongYiTeachDays)
+label(LongYiTeachDaysReturn)
+registersymbol(LongYiTeachDays)
+LongYiTeachDaysHook:
+ mov edi,[LongYiTeachDays]
+ cmp edi,1
+ jge @f
+ mov edi,1
+@@:
+ test rcx,rcx
+ jmp LongYiTeachDaysReturn
+align 4
+LongYiTeachDays:
+ dd 3
+GameAssembly.dll+2A1E47:
+ jmp LongYiTeachDaysHook
+ nop
+LongYiTeachDaysReturn:
+
+[DISABLE]
+GameAssembly.dll+2A1E47:
+ db 8B 78 70 48 85 C9
+unregistersymbol(LongYiTeachDays)
+dealloc(LongYiTeachDaysHook)

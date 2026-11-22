@@ -1,0 +1,16 @@
+[ENABLE]
+{$lua}
+if syntaxcheck then return end
+if not LongYiInventory or LongYiInventory.uiVersion~=44.8 then
+ local r=getAddressList().getMemoryRecordByID(10000)
+ if not r then error('背包管理器记录缺失，请重新载入最新 CT') end
+ r.Active=false;r.Active=true
+end
+if not LongYiInventory or LongYiInventory.uiVersion~=44.8 then error('管理器未加载成功，请先打开背包管理器') end
+LongYiInventory.showBattleRecovery()
+{$asm}
+[DISABLE]
+{$lua}
+if syntaxcheck then return end
+if LongYiInventory and LongYiInventory.recoveryForm then pcall(function()LongYiInventory.recoveryForm.hide()end) end
+{$asm}
